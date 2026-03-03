@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <PackageType>Template</PackageType>
+    <PackageId>AvantiBit.Optimizely.Templates</PackageId>
+    <PackageVersion>1.0.0</PackageVersion>
+    <Title>Optimizely Alloy Aspire Scaffold</Title>
+    <Authors>AvantiBit</Authors>
+    <Description>A .NET template that adds .NET Aspire 13 orchestration to an existing Optimizely CMS Alloy project. Generates AppHost + ServiceDefaults with YARP load balancing, shared Azurite blob storage, Azure Service Bus, and SQL Server. Includes automatic CMS 12 to CMS 13 migration.</Description>
+    <PackageTags>dotnet-new;templates;aspire;optimizely;cms;yarp;alloy</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/avantabit/optimizely-templates</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/avantabit/optimizely-templates</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <!-- Template package settings -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <IncludeContentInPack>true</IncludeContentInPack>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <ContentTargetFolders>content</ContentTargetFolders>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <NoDefaultExcludes>true</NoDefaultExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="templates\**\*" Exclude="templates\**\bin\**;templates\**\obj\**;templates\**\.vs\**" />
+    <Compile Remove="**\*" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>
