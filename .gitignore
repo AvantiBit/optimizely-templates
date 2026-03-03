@@ -430,4 +430,3 @@ docs/version-matrix.md
 .claude/settings.local.json
 PRD.md
 IMPLEMENTATION_PLAN.md
-.github/workflows/ci.yml
