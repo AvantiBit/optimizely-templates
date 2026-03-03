@@ -416,3 +416,18 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Template validation test output
+.test-output/
+
+# Internal planning/design docs
+PRD.md
+IMPLEMENTATION_PLAN.md
+docs/cms12-to-cms13-migration-delta.md
+docs/adr/
+docs/publishing-guide.md
+docs/version-matrix.md
+.claude/settings.local.json
+PRD.md
+IMPLEMENTATION_PLAN.md
+.github/workflows/ci.yml
