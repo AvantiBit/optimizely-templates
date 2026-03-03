@@ -37,7 +37,7 @@ Developer Browser
 ### 1. Install the template
 
 ```bash
-dotnet new install AvantiBit.Optimizely.Templates
+dotnet new install AvantiBit.Optimizely.Templates --prerelease  
 ```
 
 ### 2. Scaffold an Alloy project
