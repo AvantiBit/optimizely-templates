@@ -44,14 +44,7 @@ jobs:
           - name: defaults
             args: ''
           - name: custom
-            args: '--instances 3 --use-https false --lb-strategy PowerOfTwoChoices'
-        include:
-          - scenario:
-              name: defaults
-              args: ''
-          - scenario:
-              name: custom
-              args: '--instances 3 --use-https false --lb-strategy PowerOfTwoChoices'
+            args: '--instances 3 --useHttps false --lbStrategy PowerOfTwoChoices'
 
     steps:
       - uses: actions/checkout@v4

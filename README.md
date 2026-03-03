@@ -94,8 +94,8 @@ Open the Aspire dashboard URL shown in the console output to see all resources a
 |-----------|------|---------|-------------|
 | `--name` / `-n` | string | AlloyAspireScaffold | Solution and project name prefix |
 | `--instances` | int | 2 | Number of Alloy CMS replica instances |
-| `--use-https` | bool | true | Use HTTPS for the YARP gateway (port 5001 vs 5000) |
-| `--lb-strategy` | choice | RoundRobin | YARP load balancing policy |
+| `--useHttps` | bool | true | Use HTTPS for the YARP gateway (port 5001 vs 5000) |
+| `--lbStrategy` | choice | RoundRobin | YARP load balancing policy |
 | `--skipPostAction` | bool | false | Skip the CMS 12-to-13 migration script |
 
 ### Load Balancing Strategies
@@ -110,10 +110,10 @@ Open the Aspire dashboard URL shown in the console output to see all resources a
 
 ```bash
 # 3 instances with random load balancing
-dotnet new alloy-aspire-scaffold -n MyProject --instances 3 --lb-strategy Random
+dotnet new alloy-aspire-scaffold -n MyProject --instances 3 --lbStrategy Random
 
 # HTTP-only gateway
-dotnet new alloy-aspire-scaffold -n MyProject --use-https false
+dotnet new alloy-aspire-scaffold -n MyProject --useHttps false
 
 # Skip auto-migration (infrastructure only)
 dotnet new alloy-aspire-scaffold -n MyProject --skipPostAction
