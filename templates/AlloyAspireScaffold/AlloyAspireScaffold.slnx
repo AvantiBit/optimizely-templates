@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="AlloyAspireScaffold.AppHost/AlloyAspireScaffold.AppHost.csproj" />
+  <Project Path="AlloyAspireScaffold.ServiceDefaults/AlloyAspireScaffold.ServiceDefaults.csproj" />
+</Solution>

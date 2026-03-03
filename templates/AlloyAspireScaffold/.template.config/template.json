@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "AvantiBit",
+  "classifications": [
+    "Web",
+    "Aspire",
+    "Optimizely",
+    "CMS"
+  ],
+  "identity": "AvantiBit.Optimizely.Templates.AlloyAspireScaffold",
+  "name": "Optimizely Alloy Aspire Scaffold",
+  "shortName": "alloy-aspire-scaffold",
+  "description": "Overlay template that adds .NET Aspire 13 orchestration (AppHost, ServiceDefaults, YARP, shared infrastructure) to an existing Optimizely CMS Alloy project created with 'dotnet new epi-alloy-mvc'. Also migrates the Alloy project from CMS 12 to CMS 13.",
+  "defaultName": "AlloyAspireScaffold",
+  "sourceName": "AlloyAspireScaffold",
+  "preferNameDirectory": false,
+  "tags": {
+    "language": "C#",
+    "type": "solution"
+  },
+  "symbols": {
+    "instances": {
+      "type": "parameter",
+      "datatype": "int",
+      "defaultValue": "2",
+      "description": "Number of Alloy CMS instances to configure",
+      "displayName": "Instance count",
+      "replaces": "INSTANCE_COUNT"
+    },
+    "useHttps": {
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "true",
+      "description": "Configure YARP and Alloy for HTTPS",
+      "displayName": "Use HTTPS"
+    },
+    "lbStrategy": {
+      "type": "parameter",
+      "datatype": "choice",
+      "defaultValue": "RoundRobin",
+      "description": "YARP load balancing policy",
+      "displayName": "Load balancing strategy",
+      "replaces": "LB_STRATEGY_VALUE",
+      "choices": [
+        {
+          "choice": "RoundRobin",
+          "description": "Distribute requests evenly across instances"
+        },
+        {
+          "choice": "Random",
+          "description": "Randomly select an instance for each request"
+        },
+        {
+          "choice": "PowerOfTwoChoices",
+          "description": "Pick the least-loaded of two randomly chosen instances"
+        },
+        {
+          "choice": "LeastRequests",
+          "description": "Route to the instance with the fewest active requests"
+        },
+        {
+          "choice": "FirstAlphabetical",
+          "description": "Route to the first alphabetically ordered instance"
+        }
+      ]
+    },
+    "skipPostAction": {
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "false",
+      "description": "Skip the post-creation script that migrates the Alloy project to CMS 13 + Aspire",
+      "displayName": "Skip post-action"
+    }
+  },
+  "sources": [
+    {
+      "modifiers": [
+        {
+          "exclude": [
+            "**/[Bb]in/**",
+            "**/[Oo]bj/**",
+            "**/.vs/**",
+            "**/.vscode/**",
+            "**/*.user",
+            "**/*.suo"
+          ]
+        }
+      ]
+    }
+  ],
+  "primaryOutputs": [
+    { "path": "AlloyAspireScaffold.slnx" },
+    { "path": "AlloyAspireScaffold.AppHost/AlloyAspireScaffold.AppHost.csproj" },
+    { "path": "AlloyAspireScaffold.ServiceDefaults/AlloyAspireScaffold.ServiceDefaults.csproj" }
+  ],
+  "postActions": [
+    {
+      "id": "migrate-alloy",
+      "condition": "(!skipPostAction)",
+      "description": "Migrate existing Alloy CMS 12 project to CMS 13 + Aspire integration",
+      "manualInstructions": [
+        {
+          "text": "Run 'pwsh -File post-setup.ps1' in the output directory to migrate your Alloy project to CMS 13 with Aspire integration. See docs/cms12-to-cms13-migration-delta.md for manual steps."
+        }
+      ],
+      "actionId": "3A7C4B45-1F5D-4A30-959A-51B88E82B5D2",
+      "args": {
+        "executable": "pwsh",
+        "args": "-File post-setup.ps1",
+        "redirectStandardOutput": "false",
+        "redirectStandardError": "false"
+      },
+      "continueOnError": true
+    }
+  ]
+}
