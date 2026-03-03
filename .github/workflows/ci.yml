@@ -1,0 +1,154 @@
+name: CI - Template Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  pack:
+    name: Pack template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          dotnet-quality: 'preview'
+
+      - name: Pack template
+        run: dotnet pack AvantiBit.Optimizely.Templates.csproj -o ./artifacts
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: template-package
+          path: ./artifacts/*.nupkg
+
+  validate:
+    name: Validate (${{ matrix.os }}, ${{ matrix.scenario }})
+    needs: pack
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        scenario:
+          - name: defaults
+            args: ''
+          - name: custom
+            args: '--instances 3 --use-https false --lb-strategy PowerOfTwoChoices'
+        include:
+          - scenario:
+              name: defaults
+              args: ''
+          - scenario:
+              name: custom
+              args: '--instances 3 --use-https false --lb-strategy PowerOfTwoChoices'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          dotnet-quality: 'preview'
+
+      - name: Download template package
+        uses: actions/download-artifact@v4
+        with:
+          name: template-package
+          path: ./artifacts
+
+      - name: Install Optimizely templates
+        run: dotnet new install EPiServer.Templates
+
+      - name: Install our template
+        run: dotnet new install ./artifacts/*.nupkg
+        shell: bash
+
+      - name: Scaffold Alloy project
+        run: |
+          mkdir TestProject
+          cd TestProject
+          dotnet new epi-alloy-mvc -n TestProject
+
+      - name: Scaffold Aspire overlay (${{ matrix.scenario.name }})
+        run: |
+          cd TestProject
+          dotnet new alloy-aspire-scaffold -n TestProject --skipPostAction ${{ matrix.scenario.args }}
+
+      - name: Run post-setup script
+        if: matrix.scenario.name == 'defaults'
+        shell: pwsh
+        run: |
+          cd TestProject
+          & ./post-setup.ps1
+
+      - name: Build solution
+        if: matrix.scenario.name == 'defaults'
+        run: |
+          cd TestProject
+          dotnet restore TestProject.slnx
+          dotnet build TestProject.slnx --no-restore
+
+      - name: Verify template output (infrastructure only)
+        if: matrix.scenario.name == 'custom'
+        run: |
+          cd TestProject
+          test -d TestProject.AppHost || (echo "AppHost missing" && exit 1)
+          test -d TestProject.ServiceDefaults || (echo "ServiceDefaults missing" && exit 1)
+          test -f TestProject.slnx || (echo "slnx missing" && exit 1)
+        shell: bash
+
+      - name: Verify parameter substitution (${{ matrix.scenario.name }})
+        if: matrix.scenario.name == 'custom'
+        run: |
+          grep -q 'WithReplicas(3)' TestProject/TestProject.AppHost/Program.cs || (echo "instances param not applied" && exit 1)
+          grep -q 'PowerOfTwoChoices' TestProject/TestProject.AppHost/Program.cs || (echo "lbStrategy param not applied" && exit 1)
+          grep -q 'WithHostPort(5000)' TestProject/TestProject.AppHost/Program.cs || (echo "useHttps=false not applied" && exit 1)
+        shell: bash
+
+  validate-skip:
+    name: Validate skip post-action
+    needs: pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          dotnet-quality: 'preview'
+
+      - name: Download template package
+        uses: actions/download-artifact@v4
+        with:
+          name: template-package
+          path: ./artifacts
+
+      - name: Install our template
+        run: dotnet new install ./artifacts/*.nupkg
+        shell: bash
+
+      - name: Scaffold without Alloy project (should not fail)
+        run: |
+          mkdir EmptyTest
+          cd EmptyTest
+          dotnet new alloy-aspire-scaffold -n EmptyTest --skipPostAction
+
+      - name: Verify infrastructure generated
+        run: |
+          test -d EmptyTest/EmptyTest.AppHost
+          test -d EmptyTest/EmptyTest.ServiceDefaults
+          test -f EmptyTest/EmptyTest.slnx
+        shell: bash
