@@ -423,10 +423,10 @@ FodyWeavers.xsd
 # Internal planning/design docs
 PRD.md
 IMPLEMENTATION_PLAN.md
+IMPLEMENTATION_PLAN_CMS13_GA.md
 docs/cms12-to-cms13-migration-delta.md
+docs/history/
 docs/adr/
 docs/publishing-guide.md
 docs/version-matrix.md
 .claude/settings.local.json
-PRD.md
-IMPLEMENTATION_PLAN.md
