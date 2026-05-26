@@ -8,19 +8,28 @@ var builder = DistributedApplication.CreateBuilder(args);
 var sql = builder.AddSqlServer("sql")
     .AddDatabase("EPiServerDB");
 
-var storage = builder.AddAzureStorage("storage")
-    .RunAsEmulator()
-    .AddBlobs("blobs");
+var storageAccount = builder.AddAzureStorage("storage")
+    .RunAsEmulator();
+var blobs = storageAccount.AddBlobs("blobs");
 
 var serviceBus = builder.AddAzureServiceBus("messaging")
     .RunAsEmulator();
 
-// Alloy CMS web application
+// Alloy CMS web application.
+//
+// EPiServer.Azure's blob + event providers auto-bind their options from
+// the EPiServer:Cms:AzureBlobProvider and EPiServer:Cms:AzureEventProvider
+// configuration sections. We map the Aspire-allocated connection strings
+// into those sections here so Startup.cs needs no Aspire-specific code.
 var alloy = builder.AddProject<Projects.AlloyAspireScaffold>("alloy")
     .WithReference(sql)
     .WaitFor(sql)
-    .WithReference(storage)
+    .WithReference(blobs)
     .WithReference(serviceBus)
+    .WithEnvironment("EPiServer__Cms__AzureBlobProvider__ConnectionString", blobs)
+    .WithEnvironment("EPiServer__Cms__AzureBlobProvider__ContainerName", "mediablobs")
+    .WithEnvironment("EPiServer__Cms__AzureEventProvider__ConnectionString", serviceBus)
+    .WithEnvironment("EPiServer__Cms__AzureEventProvider__TopicName", "cms-events")
     .WithReplicas(INSTANCE_COUNT);
 
 // YARP reverse proxy as the single entry point

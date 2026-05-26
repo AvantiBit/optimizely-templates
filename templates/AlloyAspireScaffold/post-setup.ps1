@@ -32,8 +32,10 @@ $ScriptDir = $PSScriptRoot
 $ProjectName = 'AlloyAspireScaffold'
 
 $AzurePackageVersion = '13.0.2'
-$DefaultBlobContainerName = 'mediablobs'
-$DefaultEventTopicName = 'cms-events'
+# Container name + topic name are set by the AppHost via env vars
+# (EPiServer__Cms__AzureBlobProvider__ContainerName,
+#  EPiServer__Cms__AzureEventProvider__TopicName), so they don't need
+# to be hard-coded into the Alloy project's Startup.cs.
 
 # ── Counters for end-of-run summary ──────────────────────────────────────────
 $script:Applied = 0
@@ -308,30 +310,35 @@ Add-Using -Path $startupPath -Namespace 'EPiServer.DependencyInjection' `
 Add-Using -Path $startupPath -Namespace 'Microsoft.AspNetCore.Diagnostics.HealthChecks' `
     -Description 'Add using Microsoft.AspNetCore.Diagnostics.HealthChecks'
 
-# 4a. Register Azure blob provider after services.AddCms()
+# 4a. Register Azure blob + event providers after the AddCms() chain.
+#
+# We inject parameter-less calls. The provider options (ConnectionString,
+# ContainerName, TopicName) are populated by Optimizely's auto-binding to
+# the EPiServer:Cms:AzureBlobProvider / EPiServer:Cms:AzureEventProvider
+# config sections. The AppHost sets the corresponding env vars
+# (EPiServer__Cms__AzureBlobProvider__ConnectionString etc.) so that
+# Startup.cs needs no IConfiguration capture and no Aspire-specific code.
 $azureProvidersBlock = @"
 
 
-            services.AddAzureBlobProvider(options =>
-            {
-                options.ConnectionString = Configuration.GetConnectionString("blobs");
-                options.ContainerName = "$DefaultBlobContainerName";
-            });
-            services.AddAzureEventProvider(options =>
-            {
-                options.ConnectionString = Configuration.GetConnectionString("messaging");
-                options.TopicName = "$DefaultEventTopicName";
-            });
+        services.AddAzureBlobProvider();
+        services.AddAzureEventProvider();
 "@
 
-# Match `services.AddCms()` whether it's standalone (`...AddCms();`) or chained
-# (`...AddCms().AddAlloy();`). The regex captures up to and including the
-# terminating semicolon of the statement.
+# Match `.AddCms()` and consume forward (across newlines) to the next semicolon.
+# Upstream Alloy 2.0.1+ uses a chained-call shape:
+#   services
+#       .AddCmsAspNetIdentity<ApplicationUser>()
+#       .AddCms()
+#       .AddAlloy()
+#       .AddEmbeddedLocalization<Startup>();
+# so a literal `services.AddCms()` substring never appears. `[\s\S]*?` is
+# non-greedy and matches across newlines, ending at the chain's terminating `;`.
 Insert-AfterPattern -Path $startupPath `
-    -Pattern 'services\.AddCms\(\)[^;]*;' `
+    -Pattern '\.AddCms\(\)[\s\S]*?;' `
     -Insert $azureProvidersBlock `
     -Guard 'AddAzureBlobProvider' `
-    -Description 'Register Azure blob + event providers after services.AddCms()'
+    -Description 'Register Azure blob + event providers after AddCms() chain'
 
 # 4b. Map /health and /alive endpoints
 $startupContent = Get-Content $startupPath -Raw
