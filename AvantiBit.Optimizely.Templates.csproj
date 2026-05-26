@@ -3,9 +3,11 @@
     <PackageType>Template</PackageType>
     <PackageId>AvantiBit.Optimizely.Templates</PackageId>
     <PackageVersion>1.0.0</PackageVersion>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <Copyright>Copyright © Avantibit</Copyright>
     <Title>Optimizely Alloy Aspire Scaffold</Title>
     <Authors>AvantiBit</Authors>
-    <Description>A .NET template that adds .NET Aspire 13 orchestration to an existing Optimizely CMS Alloy project. Generates AppHost + ServiceDefaults with YARP load balancing, shared Azurite blob storage, Azure Service Bus, and SQL Server. Includes automatic CMS 12 to CMS 13 migration.</Description>
+    <Description>A .NET template that adds .NET Aspire 13.3 orchestration to an existing Optimizely CMS 13 GA Alloy project (requires EPiServer.Templates >= 2.0.1). Generates AppHost + ServiceDefaults with YARP load balancing, shared Azurite blob storage, Azure Service Bus emulator, and SQL Server container. Wires EPiServer.Azure 13.0.2 providers so blob storage and CMS event propagation work across replicas.</Description>
     <PackageTags>dotnet-new;templates;aspire;optimizely;cms;yarp;alloy</PackageTags>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/avantabit/optimizely-templates</PackageProjectUrl>

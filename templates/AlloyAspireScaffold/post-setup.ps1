@@ -1,37 +1,123 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    Migrates an existing Optimizely CMS 12 Alloy project to CMS 13 + .NET Aspire integration.
+    Overlays Aspire orchestration onto an existing Optimizely CMS 13 Alloy project.
 
 .DESCRIPTION
     This script is run as a post-action by 'dotnet new alloy-aspire-scaffold'.
-    It expects to find an Alloy project (AlloyAspireScaffold.csproj) in the same directory.
+    It expects to find a CMS 13 GA Alloy project (AlloyAspireScaffold.csproj) in the same directory.
     The sourceName replacement turns 'AlloyAspireScaffold' into the user's -n value.
 
-    Steps:
-      0. Reorganize: move Alloy web files into a subdirectory for clean solution layout
-      1-4. Patch .csproj, Program.cs, Startup.cs, apply CMS 12->13 API migrations
-      5-8. Clean up, add to .slnx, self-delete
+    The script:
+      - Validates the project is CMS 13 (fails fast on CMS 12 or unknown layouts)
+      - Moves Alloy files into a clean subdirectory
+      - Adds ServiceDefaults and EPiServer.Azure references
+      - Wires the Azure blob and event providers to Aspire-injected connection strings
+      - Maps health endpoints
+      - Removes the LocalDB connection string
+      - Cleans up .mdf/.ldf files (preserves DefaultSiteContent.episerverdata)
+      - Moves nuget.config to solution root
+      - Adds the Alloy project to .slnx
+      - Self-deletes
 
-    Each replacement is guarded with -notmatch checks for idempotency.
+    Every step is idempotent: re-running the script reports [skip] for already-applied steps
+    and [apply] for new changes.
+
+    The script does NOT migrate CMS 12 code. v1.0 of this template assumes upstream
+    EPiServer.Templates >= 2.0.1 emits a CMS 13 GA project.
 #>
 
 $ErrorActionPreference = 'Stop'
 $ScriptDir = $PSScriptRoot
 $ProjectName = 'AlloyAspireScaffold'
-$CsprojPath = Join-Path $ScriptDir "$ProjectName.csproj"
 
-# ── Guard: Alloy project must exist ────────────────────────────────────────────
-if (-not (Test-Path $CsprojPath)) {
-    Write-Warning "Could not find '$ProjectName.csproj' in '$ScriptDir'."
-    Write-Warning "This overlay template expects an existing Alloy project created with 'dotnet new epi-alloy-mvc -n $ProjectName'."
-    Write-Warning "Skipping CMS 12 -> 13 migration. AppHost and ServiceDefaults projects were still generated."
+$AzurePackageVersion = '13.0.2'
+$DefaultBlobContainerName = 'mediablobs'
+$DefaultEventTopicName = 'cms-events'
+
+# ── Counters for end-of-run summary ──────────────────────────────────────────
+$script:Applied = 0
+$script:Skipped = 0
+
+function Write-Apply { param([string]$Msg) Write-Host "  [apply] $Msg" -ForegroundColor Green; $script:Applied++ }
+function Write-Skip  { param([string]$Msg) Write-Host "  [skip]  $Msg" -ForegroundColor DarkGray; $script:Skipped++ }
+function Write-Fail  { param([string]$Msg) Write-Host "  [fail]  $Msg" -ForegroundColor Red }
+
+# ── Locate the Alloy .csproj wherever it landed ──────────────────────────────
+# Upstream Alloy may emit files flat in $ScriptDir, or inside a $ProjectName
+# subdirectory. We also tolerate partial state from an interrupted prior run.
+# Search order: canonical subdir, $ScriptDir root, then a shallow recursive fallback.
+function Find-AlloyCsproj {
+    param([string]$ScriptDir, [string]$ProjectName)
+
+    $canonical = Join-Path $ScriptDir $ProjectName | Join-Path -ChildPath "$ProjectName.csproj"
+    if (Test-Path $canonical) { return (Resolve-Path $canonical).Path }
+
+    $rootLevel = Join-Path $ScriptDir "$ProjectName.csproj"
+    if (Test-Path $rootLevel) { return (Resolve-Path $rootLevel).Path }
+
+    # Fallback: shallow recursive search, skip overlay/build artefacts.
+    $excludedRoots = @("$ProjectName.AppHost", "$ProjectName.ServiceDefaults")
+    $found = Get-ChildItem -Path $ScriptDir -Filter "$ProjectName.csproj" -Recurse -Depth 3 -File -ErrorAction SilentlyContinue |
+        Where-Object {
+            $rel = $_.FullName.Substring($ScriptDir.Length).TrimStart('\','/')
+            $firstSegment = ($rel -split '[\\/]')[0]
+            ($firstSegment -notin $excludedRoots) -and ($rel -notmatch '[\\/](bin|obj)[\\/]')
+        } |
+        Select-Object -First 1
+    if ($found) { return $found.FullName }
+
+    return $null
+}
+
+# ============================================================================
+# Validation gate: must be a CMS 13 Alloy project
+# ============================================================================
+Write-Host "Validating target directory..." -ForegroundColor Cyan
+
+$CsprojPath = Find-AlloyCsproj -ScriptDir $ScriptDir -ProjectName $ProjectName
+
+if (-not $CsprojPath) {
+    Write-Warning "Could not locate '$ProjectName.csproj' under '$ScriptDir'."
+    Write-Warning "This overlay template expects an existing Alloy project created with:"
+    Write-Warning "  dotnet new epi-alloy-mvc -n $ProjectName"
+    Write-Warning "(requires EPiServer.Templates >= 2.0.1, which produces CMS 13 GA code)"
+    Write-Warning "AppHost and ServiceDefaults projects were generated, but the overlay was skipped."
     exit 0
 }
 
-Write-Host "Migrating '$ProjectName' to CMS 13 + Aspire..." -ForegroundColor Cyan
+Write-Host "  [ok]    Located Alloy csproj at: $CsprojPath" -ForegroundColor Green
 
-# ── Helper: Replace text in file (idempotent) ─────────────────────────────────
+$csprojContent = Get-Content $CsprojPath -Raw
+
+# Look for any EPiServer.CMS* PackageReference and parse its version.
+# Accepts both the meta-package (EPiServer.CMS) and the AspNetCore package.
+$cmsMatch = [regex]::Match(
+    $csprojContent,
+    'PackageReference\s+Include="EPiServer\.CMS(?:\.AspNetCore)?"\s+Version="([^"]+)"'
+)
+
+if (-not $cmsMatch.Success) {
+    Write-Host "  [fail]  Could not find an EPiServer.CMS PackageReference in $ProjectName.csproj." -ForegroundColor Red
+    Write-Host "          Is this an Alloy project produced by EPiServer.Templates?" -ForegroundColor Red
+    exit 1
+}
+
+$cmsVersionRaw = $cmsMatch.Groups[1].Value
+$cmsMajor = [int]($cmsVersionRaw -split '[\.\-]')[0]
+
+if ($cmsMajor -lt 13) {
+    Write-Host "  [fail]  Detected EPiServer.CMS $cmsVersionRaw (major version $cmsMajor)." -ForegroundColor Red
+    Write-Host "          This template requires CMS 13 GA. CMS 12 -> 13 migration is not in scope." -ForegroundColor Red
+    Write-Host "          Upgrade the Alloy project via upstream Optimizely tooling first." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "  [ok]    Detected EPiServer.CMS $cmsVersionRaw (CMS 13 GA)" -ForegroundColor Green
+Write-Host ""
+Write-Host "Overlaying Aspire orchestration onto '$ProjectName'..." -ForegroundColor Cyan
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 function Replace-InFile {
     param(
         [string]$Path,
@@ -41,32 +127,25 @@ function Replace-InFile {
         [switch]$Regex
     )
     if (-not (Test-Path $Path)) {
-        Write-Warning "  SKIP ($Description): File not found: $Path"
+        Write-Skip "$Description (file not found)"
         return
     }
     $content = Get-Content $Path -Raw
     if ($null -eq $content) {
-        Write-Warning "  SKIP ($Description): File is empty: $Path"
+        Write-Skip "$Description (file empty)"
         return
     }
     if ($Regex) {
-        if ($content -notmatch $Find) {
-            Write-Host "  SKIP ($Description): Pattern not found (already applied?)" -ForegroundColor DarkGray
-            return
-        }
+        if ($content -notmatch $Find) { Write-Skip $Description; return }
         $newContent = $content -replace $Find, $Replace
     } else {
-        if (-not $content.Contains($Find)) {
-            Write-Host "  SKIP ($Description): Pattern not found (already applied?)" -ForegroundColor DarkGray
-            return
-        }
+        if (-not $content.Contains($Find)) { Write-Skip $Description; return }
         $newContent = $content.Replace($Find, $Replace)
     }
     Set-Content $Path -Value $newContent -NoNewline
-    Write-Host "  OK   $Description" -ForegroundColor Green
+    Write-Apply $Description
 }
 
-# ── Helper: Insert text after a pattern (idempotent) ──────────────────────────
 function Insert-AfterPattern {
     param(
         [string]$Path,
@@ -75,125 +154,126 @@ function Insert-AfterPattern {
         [string]$Guard,
         [string]$Description
     )
-    if (-not (Test-Path $Path)) {
-        Write-Warning "  SKIP ($Description): File not found: $Path"
-        return
-    }
+    if (-not (Test-Path $Path)) { Write-Skip "$Description (file not found)"; return }
     $content = Get-Content $Path -Raw
-    if ($content -match [regex]::Escape($Guard)) {
-        Write-Host "  SKIP ($Description): Already present" -ForegroundColor DarkGray
-        return
-    }
-    if ($content -notmatch $Pattern) {
-        Write-Warning "  SKIP ($Description): Anchor pattern not found"
-        return
-    }
+    if ($content -match [regex]::Escape($Guard)) { Write-Skip $Description; return }
+    if ($content -notmatch $Pattern) { Write-Skip "$Description (anchor not found)"; return }
     $newContent = $content -replace $Pattern, "`$0$Insert"
     Set-Content $Path -Value $newContent -NoNewline
-    Write-Host "  OK   $Description" -ForegroundColor Green
+    Write-Apply $Description
 }
 
-# ── Helper: Insert using directive (idempotent) ───────────────────────────────
 function Add-Using {
     param(
         [string]$Path,
         [string]$Namespace,
         [string]$Description
     )
-    if (-not (Test-Path $Path)) {
-        Write-Warning "  SKIP ($Description): File not found: $Path"
-        return
-    }
+    if (-not (Test-Path $Path)) { Write-Skip "$Description (file not found)"; return }
     $content = Get-Content $Path -Raw
     $directive = "using $Namespace;"
-    if ($content.Contains($directive)) {
-        Write-Host "  SKIP ($Description): Already present" -ForegroundColor DarkGray
-        return
-    }
-    # Insert after the last existing using
+    if ($content.Contains($directive)) { Write-Skip $Description; return }
     $newContent = $content -replace '(using [^;]+;\r?\n)(?!using )', "`$1$directive`n"
     if ($newContent -eq $content) {
-        # Fallback: prepend
         $newContent = "$directive`n$content"
     }
     Set-Content $Path -Value $newContent -NoNewline
-    Write-Host "  OK   $Description" -ForegroundColor Green
+    Write-Apply $Description
 }
 
 # ============================================================================
-# 0. Reorganize: move Alloy web project into its own subdirectory
+# 1. Reorganize: move Alloy web project into its own subdirectory
 # ============================================================================
-Write-Host "`n[0/9] Reorganizing solution layout..." -ForegroundColor Yellow
+# The target layout is $ScriptDir/$ProjectName/<alloy files>. We use the
+# discovered $CsprojPath (set during validation) to decide what to do:
+#   - csproj already in the canonical subdir → nothing to do
+#   - csproj at the $ScriptDir root          → move flat files into the subdir
+#   - csproj somewhere else                  → preserve that location, skip reorg
+# ============================================================================
+Write-Host "`n[1/8] Reorganize solution layout" -ForegroundColor Yellow
 
-$WebProjectDir = Join-Path $ScriptDir $ProjectName
+$canonicalSubdir = Join-Path $ScriptDir $ProjectName
+$canonicalCsproj = Join-Path $canonicalSubdir "$ProjectName.csproj"
+$sourceDir = Split-Path $CsprojPath -Parent
 
-if (Test-Path $WebProjectDir) {
-    Write-Host "  SKIP (Reorganize): $ProjectName/ subdirectory already exists" -ForegroundColor DarkGray
-} else {
-    New-Item -ItemType Directory -Path $WebProjectDir -Force | Out-Null
+if ($CsprojPath -ieq $canonicalCsproj) {
+    $WebProjectDir = $canonicalSubdir
+    Write-Skip "Reorganize (Alloy already in $ProjectName/ subdirectory)"
+}
+elseif ($sourceDir -ieq $ScriptDir) {
+    # Flat layout. Move every non-overlay item into the canonical subdir.
+    if (-not (Test-Path $canonicalSubdir)) {
+        New-Item -ItemType Directory -Path $canonicalSubdir -Force | Out-Null
+    }
 
-    # Items that belong to the overlay (stay at solution root)
     $overlayItems = @(
         "$ProjectName.slnx",
         "$ProjectName.AppHost",
         "$ProjectName.ServiceDefaults",
         'post-setup.ps1',
-        $ProjectName   # the subdirectory we just created
+        $ProjectName
     )
 
-    # Move everything else into the web project subdirectory
+    $moved = 0
+    $conflicts = 0
     Get-ChildItem $ScriptDir -Force | Where-Object {
         $_.Name -notin $overlayItems
     } | ForEach-Object {
-        Move-Item $_.FullName -Destination $WebProjectDir
+        $dest = Join-Path $canonicalSubdir $_.Name
+        if (Test-Path $dest) {
+            # Partial state from a previous interrupted run; leave existing target alone.
+            $conflicts++
+        } else {
+            Move-Item $_.FullName -Destination $canonicalSubdir
+            $moved++
+        }
     }
 
-    Write-Host "  OK   Moved Alloy web project files into $ProjectName/" -ForegroundColor Green
+    $WebProjectDir = $canonicalSubdir
+    if ($moved -gt 0) {
+        $msg = "Moved $moved Alloy item(s) into $ProjectName/"
+        if ($conflicts -gt 0) { $msg += " ($conflicts item(s) already present in target)" }
+        Write-Apply $msg
+    } else {
+        Write-Skip "Reorganize (all $conflicts item(s) already in target)"
+    }
+}
+else {
+    # Alloy lives in a non-canonical, non-flat location (e.g. nested deeper).
+    # Don't risk a move; just operate on it in place.
+    $WebProjectDir = $sourceDir
+    Write-Host "  [info]  Alloy project located at non-canonical path; operating in place." -ForegroundColor DarkGray
+    Write-Skip "Reorganize (non-canonical layout, preserving $WebProjectDir)"
 }
 
-# All subsequent paths reference files inside the web project subdirectory
 $CsprojPath = Join-Path $WebProjectDir "$ProjectName.csproj"
 
-# ============================================================================
-# 1. Patch .csproj
-# ============================================================================
-Write-Host "`n[1/9] Patching $ProjectName.csproj..." -ForegroundColor Yellow
-
-# TFM: net8.0 -> net10.0
-Replace-InFile -Path $CsprojPath `
-    -Find '<TargetFramework>net8.0</TargetFramework>' `
-    -Replace '<TargetFramework>net10.0</TargetFramework>' `
-    -Description 'TFM net8.0 -> net10.0'
-
-# EPiServer.CMS version bump
-Replace-InFile -Path $CsprojPath `
-    -Find 'Include="EPiServer.CMS" Version="12[^"]*"' `
-    -Replace 'Include="EPiServer.CMS" Version="13.0.0-preview3"' `
-    -Description 'EPiServer.CMS -> 13.0.0-preview3' `
-    -Regex
-
-# Wangkanai.Detection version bump
-Replace-InFile -Path $CsprojPath `
-    -Find 'Include="Wangkanai.Detection" Version="[^"]*"' `
-    -Replace 'Include="Wangkanai.Detection" Version="8.20.0"' `
-    -Description 'Wangkanai.Detection -> 8.20.0' `
-    -Regex
-
-# Add EPiServer.CMS.UI.AspNetIdentity if not present
-$csprojContent = Get-Content $CsprojPath -Raw
-if ($csprojContent -notmatch 'EPiServer\.CMS\.UI\.AspNetIdentity') {
-    Replace-InFile -Path $CsprojPath `
-        -Find '<PackageReference Include="EPiServer.CMS"' `
-        -Replace '<PackageReference Include="EPiServer.CMS.UI.AspNetIdentity" Version="13.0.0-preview3" />
-    <PackageReference Include="EPiServer.CMS"' `
-        -Description 'Add EPiServer.CMS.UI.AspNetIdentity package'
-} else {
-    Write-Host "  SKIP (Add EPiServer.CMS.UI.AspNetIdentity): Already present" -ForegroundColor DarkGray
+if (-not (Test-Path $CsprojPath)) {
+    Write-Fail "Expected $ProjectName.csproj at $CsprojPath after reorganize step, but it is missing."
+    exit 1
 }
 
-# Add ServiceDefaults project reference (sibling directory, so ../)
+# ============================================================================
+# 2. Patch .csproj: add ServiceDefaults reference + EPiServer.Azure package
+# ============================================================================
+Write-Host "`n[2/8] Patch $ProjectName.csproj" -ForegroundColor Yellow
+
+# 2a. Add EPiServer.Azure for distributed blob storage + event propagation
 $csprojContent = Get-Content $CsprojPath -Raw
-if ($csprojContent -notmatch 'ServiceDefaults') {
+if ($csprojContent -match 'EPiServer\.Azure"\s+Version=') {
+    Write-Skip "Add EPiServer.Azure package reference"
+} else {
+    Replace-InFile -Path $CsprojPath `
+        -Find '<PackageReference Include="EPiServer.CMS"' `
+        -Replace "<PackageReference Include=`"EPiServer.Azure`" Version=`"$AzurePackageVersion`" />`n    <PackageReference Include=`"EPiServer.CMS`"" `
+        -Description "Add EPiServer.Azure $AzurePackageVersion package reference"
+}
+
+# 2b. Add ServiceDefaults project reference
+$csprojContent = Get-Content $CsprojPath -Raw
+if ($csprojContent -match 'ServiceDefaults') {
+    Write-Skip "Add ServiceDefaults project reference"
+} else {
     Replace-InFile -Path $CsprojPath `
         -Find '</Project>' `
         -Replace "
@@ -202,54 +282,62 @@ if ($csprojContent -notmatch 'ServiceDefaults') {
   </ItemGroup>
 </Project>" `
         -Description 'Add ServiceDefaults project reference'
-} else {
-    Write-Host "  SKIP (Add ServiceDefaults reference): Already present" -ForegroundColor DarkGray
 }
 
 # ============================================================================
-# 2. Patch Program.cs - Add .AddServiceDefaults()
+# 3. Patch Program.cs: add .AddServiceDefaults()
 # ============================================================================
-Write-Host "`n[2/9] Patching Program.cs..." -ForegroundColor Yellow
+Write-Host "`n[3/8] Patch Program.cs" -ForegroundColor Yellow
 
 $programPath = Join-Path $WebProjectDir 'Program.cs'
 Insert-AfterPattern -Path $programPath `
     -Pattern '\.ConfigureCmsDefaults\(\)' `
     -Insert "`n    .AddServiceDefaults()" `
     -Guard 'AddServiceDefaults' `
-    -Description 'Add .AddServiceDefaults() after .ConfigureCmsDefaults()'
+    -Description 'Insert .AddServiceDefaults() after .ConfigureCmsDefaults()'
 
 # ============================================================================
-# 3. Patch Startup.cs
+# 4. Patch Startup.cs: usings + Azure providers + health endpoints
 # ============================================================================
-Write-Host "`n[3/9] Patching Startup.cs..." -ForegroundColor Yellow
+Write-Host "`n[4/8] Patch Startup.cs" -ForegroundColor Yellow
 
 $startupPath = Join-Path $WebProjectDir 'Startup.cs'
 
-# Add required using directives
-Add-Using -Path $startupPath -Namespace 'EPiServer.DependencyInjection' -Description 'Add using EPiServer.DependencyInjection'
-Add-Using -Path $startupPath -Namespace 'EPiServer.Data' -Description 'Add using EPiServer.Data'
-Add-Using -Path $startupPath -Namespace 'Microsoft.AspNetCore.Diagnostics.HealthChecks' -Description 'Add using Microsoft.AspNetCore.Diagnostics.HealthChecks'
+Add-Using -Path $startupPath -Namespace 'EPiServer.DependencyInjection' `
+    -Description 'Add using EPiServer.DependencyInjection'
+Add-Using -Path $startupPath -Namespace 'Microsoft.AspNetCore.Diagnostics.HealthChecks' `
+    -Description 'Add using Microsoft.AspNetCore.Diagnostics.HealthChecks'
 
-# Add DataAccessOptions configuration
+# 4a. Register Azure blob provider after services.AddCms()
+$azureProvidersBlock = @"
+
+
+            services.AddAzureBlobProvider(options =>
+            {
+                options.ConnectionString = Configuration.GetConnectionString("blobs");
+                options.ContainerName = "$DefaultBlobContainerName";
+            });
+            services.AddAzureEventProvider(options =>
+            {
+                options.ConnectionString = Configuration.GetConnectionString("messaging");
+                options.TopicName = "$DefaultEventTopicName";
+            });
+"@
+
+# Match `services.AddCms()` whether it's standalone (`...AddCms();`) or chained
+# (`...AddCms().AddAlloy();`). The regex captures up to and including the
+# terminating semicolon of the statement.
 Insert-AfterPattern -Path $startupPath `
-    -Pattern '\.AddCms\(\)' `
-    -Insert "`n                .AddVisitorGroups()" `
-    -Guard 'AddVisitorGroups' `
-    -Description 'Add .AddVisitorGroups() after .AddCms()'
+    -Pattern 'services\.AddCms\(\)[^;]*;' `
+    -Insert $azureProvidersBlock `
+    -Guard 'AddAzureBlobProvider' `
+    -Description 'Register Azure blob + event providers after services.AddCms()'
 
-# Add DataAccessOptions.UpdateDatabaseCompatibilityLevel
+# 4b. Map /health and /alive endpoints
 $startupContent = Get-Content $startupPath -Raw
-if ($startupContent -notmatch 'UpdateDatabaseCompatibilityLevel') {
-    Insert-AfterPattern -Path $startupPath `
-        -Pattern 'services\.AddCms\(\)' `
-        -Insert ";`n            services.Configure<DataAccessOptions>(o => o.UpdateDatabaseCompatibilityLevel = true)" `
-        -Guard 'UpdateDatabaseCompatibilityLevel' `
-        -Description 'Add DataAccessOptions.UpdateDatabaseCompatibilityLevel = true'
-}
-
-# Add health check endpoint mappings inside UseEndpoints
-$startupContent = Get-Content $startupPath -Raw
-if ($startupContent -notmatch 'MapHealthChecks') {
+if ($startupContent -match 'MapHealthChecks') {
+    Write-Skip 'Map /health and /alive endpoints'
+} else {
     Replace-InFile -Path $startupPath `
         -Find 'endpoints.MapContent();' `
         -Replace 'endpoints.MapContent();
@@ -258,79 +346,13 @@ if ($startupContent -notmatch 'MapHealthChecks') {
             {
                 Predicate = r => r.Tags.Contains("live")
             });' `
-        -Description 'Add health check endpoint mappings'
-}
-
-# ============================================================================
-# 4. CMS 12 -> 13 API Migrations
-# ============================================================================
-Write-Host "`n[4/9] Applying CMS 12 -> 13 API migrations..." -ForegroundColor Yellow
-
-# --- 4.1 PageReference -> ContentReference ---
-$prFiles = @(
-    "Models/Pages/StartPage.cs",
-    "Models/Blocks/ContactBlock.cs",
-    "Models/Blocks/PageListBlock.cs",
-    "Models/Blocks/TeaserBlock.cs",
-    "Business/ContentLocator.cs",
-    "Business/EditorDescriptors/ContactPageSelector.cs"
-)
-foreach ($f in $prFiles) {
-    $filePath = Join-Path $WebProjectDir $f
-    if (Test-Path $filePath) {
-        Replace-InFile -Path $filePath `
-            -Find 'PageReference' `
-            -Replace 'ContentReference' `
-            -Description "PageReference -> ContentReference in $f"
-    }
-}
-
-# --- 4.2 IContentTypeRepository<PageType> -> IContentTypeRepository ---
-$ptExtPath = Join-Path $WebProjectDir 'Business/PageTypeExtensions.cs'
-if (Test-Path $ptExtPath) {
-    Replace-InFile -Path $ptExtPath `
-        -Find 'IContentTypeRepository<PageType>' `
-        -Replace 'IContentTypeRepository' `
-        -Description 'IContentTypeRepository<PageType> -> IContentTypeRepository'
-
-    # The non-generic .Load() returns ContentType, need explicit cast to PageType
-    Replace-InFile -Path $ptExtPath `
-        -Find 'return pageTypeRepository.Load(pageType);' `
-        -Replace 'return (PageType)pageTypeRepository.Load(pageType);' `
-        -Description 'Add (PageType) cast for non-generic IContentTypeRepository.Load()'
-}
-
-# --- 4.3 InitializationEngine.Locate -> context.Services ---
-$renderInitPath = Join-Path $WebProjectDir 'Business/Initialization/CustomizedRenderingInitialization.cs'
-Replace-InFile -Path $renderInitPath `
-    -Find 'context.Locate.Advanced.GetInstance' `
-    -Replace 'context.Services.GetRequiredService' `
-    -Description 'InitializationEngine.Locate -> context.Services in CustomizedRenderingInitialization.cs'
-
-# Add using for GetRequiredService extension
-if (Test-Path $renderInitPath) {
-    Add-Using -Path $renderInitPath -Namespace 'Microsoft.Extensions.DependencyInjection' -Description 'Add using Microsoft.Extensions.DependencyInjection to CustomizedRenderingInitialization.cs'
-}
-
-# --- 4.4 SiteDefinition.Current ---
-# SiteDefinition.Current is [Obsolete] in CMS 13 (warnings only, not errors).
-# Replacing it requires adding ISiteDefinitionResolver DI injection to multiple classes.
-# We leave these as-is to keep the migration simple; users can address the warnings later.
-Write-Host "  INFO SiteDefinition.Current usages left as-is (obsolete warnings only)" -ForegroundColor DarkGray
-
-# --- 4.5 PageContext.Page -> PageContext.Content ---
-$pageControllerBasePath = Join-Path $WebProjectDir 'Controllers/PageControllerBase.cs'
-if (Test-Path $pageControllerBasePath) {
-    Replace-InFile -Path $pageControllerBasePath `
-        -Find 'PageContext.Page' `
-        -Replace 'PageContext.Content' `
-        -Description 'PageContext.Page -> PageContext.Content in PageControllerBase.cs'
+        -Description 'Map /health and /alive endpoints'
 }
 
 # ============================================================================
 # 5. Remove LocalDB connection string from appsettings.Development.json
 # ============================================================================
-Write-Host "`n[5/9] Cleaning appsettings.Development.json..." -ForegroundColor Yellow
+Write-Host "`n[5/8] Clean appsettings.Development.json" -ForegroundColor Yellow
 
 $devSettingsPath = Join-Path $WebProjectDir 'appsettings.Development.json'
 if (Test-Path $devSettingsPath) {
@@ -338,93 +360,94 @@ if (Test-Path $devSettingsPath) {
         $devSettings = Get-Content $devSettingsPath -Raw | ConvertFrom-Json
         if ($devSettings.ConnectionStrings -and $devSettings.ConnectionStrings.EPiServerDB) {
             $devSettings.ConnectionStrings.PSObject.Properties.Remove('EPiServerDB')
-            # If ConnectionStrings is now empty, remove it too
             if (($devSettings.ConnectionStrings.PSObject.Properties | Measure-Object).Count -eq 0) {
                 $devSettings.PSObject.Properties.Remove('ConnectionStrings')
             }
             $devSettings | ConvertTo-Json -Depth 10 | Set-Content $devSettingsPath -NoNewline
-            Write-Host "  OK   Removed LocalDB connection string from appsettings.Development.json" -ForegroundColor Green
+            Write-Apply 'Removed LocalDB connection string from appsettings.Development.json'
         } else {
-            Write-Host "  SKIP (Remove LocalDB connection string): Not found or already removed" -ForegroundColor DarkGray
+            Write-Skip 'Remove LocalDB connection string'
         }
     } catch {
-        Write-Warning "  SKIP (appsettings.Development.json): Failed to parse JSON - $_"
+        Write-Fail "Failed to parse appsettings.Development.json: $_"
     }
+} else {
+    Write-Skip 'Remove LocalDB connection string (file not found)'
 }
 
 # ============================================================================
-# 6. Remove App_Data/*.mdf and *.ldf files
+# 6. Remove App_Data/*.mdf and *.ldf (preserve DefaultSiteContent.episerverdata)
 # ============================================================================
-Write-Host "`n[6/9] Cleaning App_Data database files..." -ForegroundColor Yellow
+Write-Host "`n[6/8] Clean App_Data database files" -ForegroundColor Yellow
 
 $appDataPath = Join-Path $WebProjectDir 'App_Data'
 if (Test-Path $appDataPath) {
     $dbFiles = Get-ChildItem $appDataPath -Include '*.mdf', '*.ldf' -File -ErrorAction SilentlyContinue
-    foreach ($dbFile in $dbFiles) {
-        Remove-Item $dbFile.FullName -Force
-        Write-Host "  OK   Removed $($dbFile.Name)" -ForegroundColor Green
-    }
-    if (-not $dbFiles) {
-        Write-Host "  SKIP (App_Data cleanup): No .mdf/.ldf files found" -ForegroundColor DarkGray
+    if ($dbFiles) {
+        foreach ($dbFile in $dbFiles) {
+            Remove-Item $dbFile.FullName -Force
+            Write-Apply "Removed App_Data/$($dbFile.Name)"
+        }
+    } else {
+        Write-Skip 'Clean App_Data database files (none present)'
     }
 } else {
-    Write-Host "  SKIP (App_Data cleanup): App_Data directory not found" -ForegroundColor DarkGray
+    Write-Skip 'Clean App_Data database files (folder not found)'
 }
 
 # ============================================================================
-# 7. Move nuget.config to solution root (if not already there)
+# 7. Move nuget.config to solution root
 # ============================================================================
-Write-Host "`n[7/9] Moving nuget.config to solution root..." -ForegroundColor Yellow
+Write-Host "`n[7/8] Move nuget.config to solution root" -ForegroundColor Yellow
 
 $nugetConfigInWeb = Join-Path $WebProjectDir 'nuget.config'
 $nugetConfigAtRoot = Join-Path $ScriptDir 'nuget.config'
 if ((Test-Path $nugetConfigInWeb) -and -not (Test-Path $nugetConfigAtRoot)) {
     Move-Item $nugetConfigInWeb -Destination $nugetConfigAtRoot
-    Write-Host "  OK   Moved nuget.config to solution root" -ForegroundColor Green
+    Write-Apply 'Moved nuget.config to solution root'
 } elseif (Test-Path $nugetConfigAtRoot) {
-    # Already at root; remove duplicate in web project
     if (Test-Path $nugetConfigInWeb) { Remove-Item $nugetConfigInWeb -Force }
-    Write-Host "  SKIP (nuget.config): Already at solution root" -ForegroundColor DarkGray
+    Write-Skip 'Move nuget.config (already at solution root)'
 } else {
-    Write-Host "  SKIP (nuget.config): Not found" -ForegroundColor DarkGray
+    Write-Skip 'Move nuget.config (not found)'
 }
 
 # ============================================================================
-# 8. Add Alloy project to .slnx
+# 8. Register Alloy project in .slnx
 # ============================================================================
-Write-Host "`n[8/9] Adding $ProjectName to solution..." -ForegroundColor Yellow
+Write-Host "`n[8/8] Register $ProjectName in .slnx" -ForegroundColor Yellow
 
 $slnxPath = Join-Path $ScriptDir "$ProjectName.slnx"
 if (Test-Path $slnxPath) {
     $slnxContent = Get-Content $slnxPath -Raw
     $projectEntry = "  <Project Path=`"$ProjectName/$ProjectName.csproj`" />"
-    if ($slnxContent -notmatch [regex]::Escape("$ProjectName.csproj")) {
+    if ($slnxContent -match [regex]::Escape("$ProjectName.csproj")) {
+        Write-Skip "Register $ProjectName in .slnx"
+    } else {
         Replace-InFile -Path $slnxPath `
             -Find '</Solution>' `
             -Replace "$projectEntry`n</Solution>" `
-            -Description "Add $ProjectName/$ProjectName.csproj to .slnx"
-    } else {
-        Write-Host "  SKIP (Add to .slnx): Project already in solution" -ForegroundColor DarkGray
+            -Description "Register $ProjectName in .slnx"
     }
 } else {
-    Write-Warning "  SKIP (Add to .slnx): $ProjectName.slnx not found"
+    Write-Skip "Register $ProjectName in .slnx (.slnx not found)"
 }
 
 # ============================================================================
-# 9. Self-delete
+# Summary + self-delete
 # ============================================================================
-Write-Host "`n[9/9] Cleaning up..." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "─────────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host "Overlay complete. Applied: $script:Applied  Skipped: $script:Skipped" -ForegroundColor Cyan
+Write-Host "─────────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host "Next steps:" -ForegroundColor Cyan
+Write-Host "  1. dotnet build $ProjectName.slnx"
+Write-Host "  2. cd $ProjectName.AppHost && dotnet run"
+Write-Host "  3. Open the Aspire dashboard URL printed to the console"
+Write-Host "  4. Navigate to the YARP gateway and register an admin user"
+Write-Host ""
 
 $scriptPath = Join-Path $ScriptDir 'post-setup.ps1'
 if (Test-Path $scriptPath) {
     Remove-Item $scriptPath -Force
-    Write-Host "  OK   Removed post-setup.ps1" -ForegroundColor Green
 }
-
-Write-Host "`nMigration complete!" -ForegroundColor Green
-Write-Host "Next steps:" -ForegroundColor Cyan
-Write-Host "  1. dotnet build $ProjectName.slnx"
-Write-Host "  2. cd $ProjectName.AppHost && dotnet run"
-Write-Host "  3. Open the Aspire dashboard and verify all resources are healthy"
-Write-Host "  4. Register an admin user on first CMS access"
-Write-Host "  5. Configure the CMS 13 Application Model (see docs for details)"

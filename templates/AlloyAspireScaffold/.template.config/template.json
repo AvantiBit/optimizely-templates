@@ -10,7 +10,7 @@
   "identity": "AvantiBit.Optimizely.Templates.AlloyAspireScaffold",
   "name": "Optimizely Alloy Aspire Scaffold",
   "shortName": "alloy-aspire-scaffold",
-  "description": "Overlay template that adds .NET Aspire 13 orchestration (AppHost, ServiceDefaults, YARP, shared infrastructure) to an existing Optimizely CMS Alloy project created with 'dotnet new epi-alloy-mvc'. Also migrates the Alloy project from CMS 12 to CMS 13.",
+  "description": "Overlay template that adds .NET Aspire 13.3 orchestration (AppHost, ServiceDefaults, YARP, shared infrastructure, EPiServer.Azure providers for distributed blob and event propagation) to an existing Optimizely CMS 13 GA Alloy project created with 'dotnet new epi-alloy-mvc' (EPiServer.Templates >= 2.0.1). Validates the project is CMS 13; does not migrate from CMS 12.",
   "defaultName": "AlloyAspireScaffold",
   "sourceName": "AlloyAspireScaffold",
   "preferNameDirectory": false,
@@ -68,7 +68,7 @@
       "type": "parameter",
       "datatype": "bool",
       "defaultValue": "false",
-      "description": "Skip the post-creation script that migrates the Alloy project to CMS 13 + Aspire",
+      "description": "Skip the post-creation overlay script (generates infrastructure projects only)",
       "displayName": "Skip post-action"
     }
   },
@@ -95,12 +95,12 @@
   ],
   "postActions": [
     {
-      "id": "migrate-alloy",
+      "id": "overlay-alloy",
       "condition": "(!skipPostAction)",
-      "description": "Migrate existing Alloy CMS 12 project to CMS 13 + Aspire integration",
+      "description": "Overlay Aspire orchestration + EPiServer.Azure providers onto the existing CMS 13 Alloy project",
       "manualInstructions": [
         {
-          "text": "Run 'pwsh -File post-setup.ps1' in the output directory to migrate your Alloy project to CMS 13 with Aspire integration. See docs/cms12-to-cms13-migration-delta.md for manual steps."
+          "text": "Run 'pwsh -File post-setup.ps1' in the output directory to overlay Aspire onto your CMS 13 Alloy project. The script validates the project, adds ServiceDefaults + EPiServer.Azure references, wires the Azure blob and event providers to Aspire-injected connection strings, and registers the project in the .slnx."
         }
       ],
       "actionId": "3A7C4B45-1F5D-4A30-959A-51B88E82B5D2",

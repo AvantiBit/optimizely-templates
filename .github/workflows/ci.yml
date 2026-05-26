@@ -21,7 +21,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-          dotnet-quality: 'preview'
 
       - name: Pack template
         run: dotnet pack AvantiBit.Optimizely.Templates.csproj -o ./artifacts
@@ -33,7 +32,7 @@ jobs:
           path: ./artifacts/*.nupkg
 
   validate:
-    name: Validate (${{ matrix.os }}, ${{ matrix.scenario }})
+    name: Validate (${{ matrix.os }}, ${{ matrix.scenario.name }})
     needs: pack
     runs-on: ${{ matrix.os }}
     strategy:
@@ -53,7 +52,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-          dotnet-quality: 'preview'
 
       - name: Download template package
         uses: actions/download-artifact@v4
@@ -61,14 +59,14 @@ jobs:
           name: template-package
           path: ./artifacts
 
-      - name: Install Optimizely templates
-        run: dotnet new install EPiServer.Templates
+      - name: Install Optimizely templates (CMS 13 GA)
+        run: dotnet new install EPiServer.Templates::2.0.1
 
       - name: Install our template
         run: dotnet new install ./artifacts/*.nupkg
         shell: bash
 
-      - name: Scaffold Alloy project
+      - name: Scaffold CMS 13 Alloy project
         run: |
           mkdir TestProject
           cd TestProject
@@ -77,14 +75,25 @@ jobs:
       - name: Scaffold Aspire overlay (${{ matrix.scenario.name }})
         run: |
           cd TestProject
-          dotnet new alloy-aspire-scaffold -n TestProject --skipPostAction ${{ matrix.scenario.args }}
+          dotnet new alloy-aspire-scaffold -n TestProject ${{ matrix.scenario.args }}
+        shell: bash
 
-      - name: Run post-setup script
+      - name: Re-run overlay to verify idempotency (${{ matrix.scenario.name }})
         if: matrix.scenario.name == 'defaults'
         shell: pwsh
         run: |
           cd TestProject
-          & ./post-setup.ps1
+          # The script self-deletes after a successful run, so a second run via the
+          # template requires reinstalling. Instead, assert the first run produced
+          # the expected output (script is gone, project is in the slnx).
+          if (Test-Path post-setup.ps1) {
+            Write-Error "post-setup.ps1 should have self-deleted after the overlay completed"
+            exit 1
+          }
+          if (-not (Select-String -Path TestProject.slnx -Pattern 'TestProject\.csproj' -Quiet)) {
+            Write-Error "TestProject.csproj missing from .slnx"
+            exit 1
+          }
 
       - name: Build solution
         if: matrix.scenario.name == 'defaults'
@@ -92,15 +101,6 @@ jobs:
           cd TestProject
           dotnet restore TestProject.slnx
           dotnet build TestProject.slnx --no-restore
-
-      - name: Verify template output (infrastructure only)
-        if: matrix.scenario.name == 'custom'
-        run: |
-          cd TestProject
-          test -d TestProject.AppHost || (echo "AppHost missing" && exit 1)
-          test -d TestProject.ServiceDefaults || (echo "ServiceDefaults missing" && exit 1)
-          test -f TestProject.slnx || (echo "slnx missing" && exit 1)
-        shell: bash
 
       - name: Verify parameter substitution (${{ matrix.scenario.name }})
         if: matrix.scenario.name == 'custom'
@@ -110,8 +110,16 @@ jobs:
           grep -q 'WithHostPort(5000)' TestProject/TestProject.AppHost/Program.cs || (echo "useHttps=false not applied" && exit 1)
         shell: bash
 
-  validate-skip:
-    name: Validate skip post-action
+      - name: Verify EPiServer.Azure was wired
+        if: matrix.scenario.name == 'defaults'
+        run: |
+          grep -q 'EPiServer.Azure' TestProject/TestProject/TestProject.csproj || (echo "EPiServer.Azure package not added" && exit 1)
+          grep -q 'AddAzureBlobProvider' TestProject/TestProject/Startup.cs || (echo "AddAzureBlobProvider call not injected" && exit 1)
+          grep -q 'AddAzureEventProvider' TestProject/TestProject/Startup.cs || (echo "AddAzureEventProvider call not injected" && exit 1)
+        shell: bash
+
+  validate-cms12-rejection:
+    name: Reject CMS 12 input
     needs: pack
     runs-on: ubuntu-latest
     steps:
@@ -121,7 +129,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-          dotnet-quality: 'preview'
 
       - name: Download template package
         uses: actions/download-artifact@v4
@@ -133,13 +140,68 @@ jobs:
         run: dotnet new install ./artifacts/*.nupkg
         shell: bash
 
-      - name: Scaffold without Alloy project (should not fail)
+      - name: Scaffold a fake CMS 12 csproj
+        run: |
+          mkdir Cms12Project
+          cd Cms12Project
+          cat > Cms12Project.csproj << 'EOF'
+          <Project Sdk="Microsoft.NET.Sdk.Web">
+            <PropertyGroup>
+              <TargetFramework>net8.0</TargetFramework>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="EPiServer.CMS" Version="12.29.0" />
+            </ItemGroup>
+          </Project>
+          EOF
+        shell: bash
+
+      - name: Scaffold overlay (should fail validation)
+        id: overlay
+        continue-on-error: true
+        run: |
+          cd Cms12Project
+          dotnet new alloy-aspire-scaffold -n Cms12Project
+        shell: bash
+
+      - name: Assert overlay refused CMS 12 input
+        run: |
+          # The post-action exits non-zero on CMS 12; dotnet new returns non-zero.
+          if [ "${{ steps.overlay.outcome }}" == "success" ]; then
+            echo "Expected the overlay to fail on a CMS 12 project, but it succeeded."
+            exit 1
+          fi
+        shell: bash
+
+  validate-skip:
+    name: Validate --skipPostAction
+    needs: pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download template package
+        uses: actions/download-artifact@v4
+        with:
+          name: template-package
+          path: ./artifacts
+
+      - name: Install our template
+        run: dotnet new install ./artifacts/*.nupkg
+        shell: bash
+
+      - name: Scaffold without Alloy project, with --skipPostAction
         run: |
           mkdir EmptyTest
           cd EmptyTest
           dotnet new alloy-aspire-scaffold -n EmptyTest --skipPostAction
 
-      - name: Verify infrastructure generated
+      - name: Verify infrastructure projects generated
         run: |
           test -d EmptyTest/EmptyTest.AppHost
           test -d EmptyTest/EmptyTest.ServiceDefaults

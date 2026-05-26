@@ -88,7 +88,7 @@ try {
     # Verify parameter substitutions
     $appHostProgram = Get-Content "$ProjectName.AppHost/Program.cs" -Raw
     if ($appHostProgram -match "WithReplicas\(2\)") {
-        Write-Host "  OK   Instance count parameter applied" -ForegroundColor Green
+        Write-Host "  OK   Instance count parameter applied (default 2)" -ForegroundColor Green
     } else {
         Write-Host "  WARN Instance count may not have been substituted" -ForegroundColor Yellow
     }
@@ -98,17 +98,26 @@ try {
         Write-Host "  WARN LB strategy may not have been substituted" -ForegroundColor Yellow
     }
 
-    # Verify CMS 13 migration was applied
+    # Verify overlay was applied (CMS 13 GA assumed — no migration)
     $csproj = Get-Content "$ProjectName/$ProjectName.csproj" -Raw
     if ($csproj -match 'net10\.0') {
-        Write-Host "  OK   TFM migrated to net10.0" -ForegroundColor Green
+        Write-Host "  OK   TFM is net10.0 (upstream)" -ForegroundColor Green
     } else {
-        Write-Host "  WARN TFM migration may not have been applied" -ForegroundColor Yellow
+        Write-Host "  FAIL TFM is not net10.0" -ForegroundColor Red
+        $allOk = $false
     }
-    if ($csproj -match '13\.0\.0-preview3') {
-        Write-Host "  OK   EPiServer.CMS bumped to 13.0.0-preview3" -ForegroundColor Green
+    if ($csproj -match 'EPiServer\.Azure"\s+Version="13\.0\.2"') {
+        Write-Host "  OK   EPiServer.Azure 13.0.2 added" -ForegroundColor Green
     } else {
-        Write-Host "  WARN EPiServer.CMS version bump may not have been applied" -ForegroundColor Yellow
+        Write-Host "  FAIL EPiServer.Azure 13.0.2 reference missing" -ForegroundColor Red
+        $allOk = $false
+    }
+    $startup = Get-Content "$ProjectName/Startup.cs" -Raw -ErrorAction SilentlyContinue
+    if ($startup -and ($startup -match 'AddAzureBlobProvider') -and ($startup -match 'AddAzureEventProvider')) {
+        Write-Host "  OK   Azure blob + event providers wired in Startup.cs" -ForegroundColor Green
+    } else {
+        Write-Host "  FAIL Azure provider registrations missing from Startup.cs" -ForegroundColor Red
+        $allOk = $false
     }
 
     if (-not $allOk) {
