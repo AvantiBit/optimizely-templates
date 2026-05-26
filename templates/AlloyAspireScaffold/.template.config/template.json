@@ -110,7 +110,7 @@
         "redirectStandardOutput": "false",
         "redirectStandardError": "false"
       },
-      "continueOnError": true
+      "continueOnError": false
     }
   ]
 }
