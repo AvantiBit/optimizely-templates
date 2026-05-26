@@ -62,7 +62,7 @@ try {
 
     # ── Step 4: Scaffold Aspire overlay ──────────────────────────────────────
     Write-Host "`n[4/6] Scaffolding Aspire overlay..." -ForegroundColor Yellow
-    dotnet new alloy-aspire-scaffold -n $ProjectName
+    dotnet new alloy-aspire-scaffold -n $ProjectName --allow-scripts Yes
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     # ── Step 5: Verify key files ─────────────────────────────────────────────
