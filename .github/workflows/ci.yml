@@ -75,7 +75,7 @@ jobs:
       - name: Scaffold Aspire overlay (${{ matrix.scenario.name }})
         run: |
           cd TestProject
-          dotnet new alloy-aspire-scaffold -n TestProject ${{ matrix.scenario.args }}
+          dotnet new alloy-aspire-scaffold -n TestProject --allow-scripts Yes ${{ matrix.scenario.args }}
         shell: bash
 
       - name: Re-run overlay to verify idempotency (${{ matrix.scenario.name }})
@@ -161,7 +161,7 @@ jobs:
         continue-on-error: true
         run: |
           cd Cms12Project
-          dotnet new alloy-aspire-scaffold -n Cms12Project
+          dotnet new alloy-aspire-scaffold -n Cms12Project --allow-scripts Yes
         shell: bash
 
       - name: Assert overlay refused CMS 12 input
