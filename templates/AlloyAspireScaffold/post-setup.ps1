@@ -309,6 +309,16 @@ Add-Using -Path $startupPath -Namespace 'EPiServer.DependencyInjection' `
     -Description 'Add using EPiServer.DependencyInjection'
 Add-Using -Path $startupPath -Namespace 'Microsoft.AspNetCore.Diagnostics.HealthChecks' `
     -Description 'Add using Microsoft.AspNetCore.Diagnostics.HealthChecks'
+# Usings required by the Aspire #14041 Service Bus emulator workaround.
+# IServiceBusSetup is in EPiServer.Azure (stable). The workaround class itself
+# (SplitConnectionServiceBusSetup) is fully-qualified in the injected
+# services.Replace(...) line below, so no using is needed for the user's own
+# project namespace — that keeps the workaround robust against Startup.cs
+# being in a sub-namespace of the project root.
+Add-Using -Path $startupPath -Namespace 'EPiServer.Azure.Events.Internal' `
+    -Description 'Add using EPiServer.Azure.Events.Internal (IServiceBusSetup)'
+Add-Using -Path $startupPath -Namespace 'Microsoft.Extensions.DependencyInjection.Extensions' `
+    -Description 'Add using Microsoft.Extensions.DependencyInjection.Extensions (services.Replace)'
 
 # 4a. Register Azure blob + event providers after the AddCms() chain.
 #
@@ -318,10 +328,20 @@ Add-Using -Path $startupPath -Namespace 'Microsoft.AspNetCore.Diagnostics.Health
 # config sections. The AppHost sets the corresponding env vars
 # (EPiServer__Cms__AzureBlobProvider__ConnectionString etc.) so that
 # Startup.cs needs no IConfiguration capture and no Aspire-specific code.
+#
+# The services.Replace(...) line is a workaround for
+# https://github.com/dotnet/aspire/issues/14041 (Aspire's Service Bus emulator
+# connection string can't be used by ServiceBusAdministrationClient). It swaps
+# EPiServer.Azure's default IServiceBusSetup for one that reads a separate
+# admin connection string. The SplitConnectionServiceBusSetup type is
+# fully-qualified with `${ProjectName}` so the registration compiles
+# regardless of whatever namespace Startup.cs happens to use. Delete the line
+# + SplitConnectionServiceBusSetup.cs when aspire#14041 ships.
 $azureProvidersBlock = @"
 
 
         services.AddAzureBlobProvider();
+        services.Replace(ServiceDescriptor.Transient<IServiceBusSetup, ${ProjectName}.SplitConnectionServiceBusSetup>());
         services.AddAzureEventProvider();
 "@
 
@@ -354,6 +374,29 @@ if ($startupContent -match 'MapHealthChecks') {
                 Predicate = r => r.Tags.Contains("live")
             });' `
         -Description 'Map /health and /alive endpoints'
+}
+
+# 4c. Move SplitConnectionServiceBusSetup.cs into the web project.
+#
+# Workaround for https://github.com/dotnet/aspire/issues/14041. The template
+# engine drops this file at the script root; move it into the CMS web project
+# directory so it compiles as part of $ProjectName.csproj. Delete the file and
+# the services.Replace(...) line above when aspire#14041 ships.
+$splitFileName = 'SplitConnectionServiceBusSetup.cs'
+$splitSrcPath = Join-Path $ScriptDir $splitFileName
+$splitDestPath = Join-Path $WebProjectDir $splitFileName
+if (Test-Path $splitDestPath) {
+    if (Test-Path $splitSrcPath) {
+        Remove-Item $splitSrcPath -Force
+        Write-Apply "Removed duplicate $splitFileName at script root (already at $WebProjectDir)"
+    } else {
+        Write-Skip "Move $splitFileName (already at $WebProjectDir)"
+    }
+} elseif (Test-Path $splitSrcPath) {
+    Move-Item $splitSrcPath -Destination $splitDestPath
+    Write-Apply "Moved $splitFileName into web project"
+} else {
+    Write-Fail "$splitFileName not found at script root; aspire#14041 workaround will be incomplete."
 }
 
 # ============================================================================

@@ -30,6 +30,22 @@ var alloy = builder.AddProject<Projects.AlloyAspireScaffold>("alloy")
     .WithEnvironment("EPiServer__Cms__AzureBlobProvider__ContainerName", "mediablobs")
     .WithEnvironment("EPiServer__Cms__AzureEventProvider__ConnectionString", serviceBus)
     .WithEnvironment("EPiServer__Cms__AzureEventProvider__TopicName", "cms-events")
+    // Workaround for https://github.com/dotnet/aspire/issues/14041 — the connection
+    // string injected via WithReference(serviceBus) uses the AMQP endpoint, which
+    // ServiceBusAdministrationClient cannot use. Inject a second connection string
+    // built from the emulatorhealth endpoint (the emulator's HTTP management port,
+    // container 5300). SplitConnectionServiceBusSetup consumes this for admin
+    // operations only; AMQP send/receive continues to use the stock connection
+    // string above. Delete this block when aspire#14041 ships.
+    .WithEnvironment(ctx =>
+    {
+        var health = serviceBus.Resource.GetEndpoint("emulatorhealth");
+        ctx.EnvironmentVariables["EPiServer__Cms__AzureEventProvider__AdminConnectionString"] =
+            $"Endpoint=sb://{health.Host}:{health.Port};" +
+            "SharedAccessKeyName=RootManageSharedAccessKey;" +
+            "SharedAccessKey=SAS_KEY_VALUE;" +
+            "UseDevelopmentEmulator=true;";
+    })
     .WithReplicas(INSTANCE_COUNT);
 
 // YARP reverse proxy as the single entry point

@@ -65,6 +65,7 @@ This generates AppHost, ServiceDefaults, and a solution file, then runs a post-a
 - Maps `/health` and `/alive` health check endpoints
 - Removes the LocalDB connection string (replaced by Aspire SQL Server container)
 - Adds `EPiServer.Azure` for distributed blob storage and event propagation
+- Drops `SplitConnectionServiceBusSetup.cs` into the CMS project and registers it as `IServiceBusSetup`, working around [dotnet/aspire#14041](https://github.com/dotnet/aspire/issues/14041) (see [Service Bus emulator workaround](#service-bus-emulator-workaround-dotnetaspire14041) below)
 - Moves `nuget.config` to the solution root
 - Adds the Alloy project to the solution
 
@@ -132,6 +133,7 @@ MyProject/                              # Solution root (working directory)
   MyProject/                            # Alloy CMS project (moved into subdirectory)
     MyProject.csproj                    # Patched with ServiceDefaults reference + EPiServer.Azure
     Program.cs, Startup.cs, ...         # Upstream Alloy source (not rewritten)
+    SplitConnectionServiceBusSetup.cs   # Temporary workaround for aspire#14041 (see Troubleshooting)
   MyProject.AppHost/                    # Aspire orchestration
     MyProject.AppHost.csproj
     Program.cs                          # Central resource wiring
@@ -210,7 +212,7 @@ The YARP gateway binds to port 5001 (HTTPS) or 5000 (HTTP) by default. If these 
 The AppHost uses `WaitFor(sql)` to ensure SQL Server is healthy before starting Alloy instances. If you see database connection errors, check the Aspire dashboard for SQL Server resource health.
 
 ### Service Bus emulator
-The Azure Service Bus emulator runs locally via Docker. No Azure subscription is needed. If Optimizely event propagation isn't working, verify the Service Bus resource is healthy in the Aspire dashboard.
+The Azure Service Bus emulator runs locally via Docker. No Azure subscription is needed. If Optimizely event propagation isn't working, verify the Service Bus resource is healthy in the Aspire dashboard. See also [Service Bus emulator workaround](#service-bus-emulator-workaround-dotnetaspire14041) for the temporary `SplitConnectionServiceBusSetup` class the scaffold drops into your project.
 
 ### Post-action script didn't run
 If `pwsh` (PowerShell Core) is not installed, the post-action script will be skipped. You'll see manual instructions in the console output. Install [PowerShell Core](https://github.com/PowerShell/PowerShell) and re-run:
@@ -236,6 +238,64 @@ A clean fix that serializes first-run schema creation is on the v1.1 roadmap; fo
 
 ### Already-overlaid project
 The post-action script is idempotent. Each step checks whether it has already been applied before making changes. It's safe to run multiple times and reports `[skip]` or `[apply]` for each step.
+
+## Service Bus emulator workaround (dotnet/aspire#14041)
+
+### What and why
+
+`Aspire.Hosting.Azure.ServiceBus` 13.3.5 exposes both the emulator's AMQP port (`emulator`, container 5672) and management port (`emulatorhealth`, container 5300), but the connection string injected via `WithReference(serviceBus)` uses the AMQP endpoint only. `EPiServer.Azure.Events.Internal.DefaultServiceBusSetup` hands that connection string to `ServiceBusAdministrationClient` which then issues HTTP against the AMQP listener. The listener closes the socket and host startup fails with:
+
+```
+Azure.RequestFailedException: An error occurred while sending the request.
+ ---> System.Net.Http.HttpIOException: The response ended prematurely.
+   at Azure.Messaging.ServiceBus.Administration.ServiceBusAdministrationClient.GetTopicAsync
+   at EPiServer.Azure.Events.Internal.DefaultServiceBusSetup.CreateTopicAsync
+```
+
+Upstream tracking: [dotnet/aspire#14041](https://github.com/dotnet/aspire/issues/14041).
+
+### What the scaffold does about it
+
+Three additions, all marked with `aspire#14041` comments in the generated code so they're easy to find later:
+
+1. **`AppHost/Program.cs`** — a `WithEnvironment(ctx => { ... })` lambda builds a second connection string from `serviceBus.Resource.GetEndpoint("emulatorhealth")` and writes it to `EPiServer__Cms__AzureEventProvider__AdminConnectionString` on each CMS replica.
+2. **`MyProject/SplitConnectionServiceBusSetup.cs`** — implements `IServiceBusSetup` using the admin connection string from `IConfiguration`. Mirrors `DefaultServiceBusSetup`'s logic exactly; the only difference is which connection string the admin client uses.
+3. **`MyProject/Startup.cs`** — `services.Replace(ServiceDescriptor.Transient<IServiceBusSetup, SplitConnectionServiceBusSetup>())` runs immediately before `services.AddAzureEventProvider();`, swapping the default registration.
+
+AMQP send/receive is untouched — the data plane continues to use the standard connection string. Only the administration client is rerouted.
+
+### How to verify events are actually flowing
+
+The fastest signal is in the structured logs. On the **receiving** replica, you should see:
+
+```
+EPiServer.Core.Internal.ContentCacheRemover  [Warning]  Cache cleared (remote only)
+```
+
+every time you edit a page on the other replica. The `(remote only)` suffix is emitted only when a cache-invalidation event arrives from Service Bus, not when triggered locally. Two replicas producing these entries cross-wise is end-to-end proof that publish-broker-subscription is round-tripping.
+
+For visual proof via the Aspire dashboard's **Traces** tab, two extra steps are needed because `Azure.Messaging.ServiceBus` 7.20.1 gates its ActivitySource emission behind an experimental flag:
+
+1. **AppHost** — add `.WithEnvironment("AZURE_EXPERIMENTAL_ENABLE_ACTIVITY_SOURCE", "true")` to each CMS resource. This is the SDK's opt-in switch (`AppContextSwitchHelper.GetConfigValue("Azure.Experimental.EnableActivitySource", "AZURE_EXPERIMENTAL_ENABLE_ACTIVITY_SOURCE")`). Newer SDK versions will make this the default; you can drop the env var when that ships.
+2. **ServiceDefaults/Extensions.cs** — add `.AddSource("Azure.Messaging.ServiceBus.*")` (note the wildcard) to the OTel tracing config. Both `AddServiceDefaults` overloads need it — the `IHostApplicationBuilder` one and the `IHostBuilder` one used by Optimizely CMS. The Azure SDK creates per-client-type sources (`Azure.Messaging.ServiceBus.ServiceBusSender`, `Azure.Messaging.ServiceBus.ServiceBusReceiver`, ...), never `Azure.Messaging.ServiceBus` directly; the wildcard is required.
+
+With both in place, the Aspire dashboard Traces tab shows publish/process spans for `cms-events` linked across replicas. The `aspire otel spans` CLI returns the same data:
+
+```bash
+aspire otel spans --apphost MyProject.AppHost/MyProject.AppHost.csproj --non-interactive --format Json --limit 2000
+```
+
+The scaffold does **not** add the experimental flag or the wildcard `AddSource` line by default — they're diagnostics, not required for the workaround to function, and the experimental flag carries SDK version-coupling risk. Apply them in your own copy of the generated project when you want trace visibility.
+
+### Removal when aspire#14041 ships
+
+Three deletes:
+
+1. The `WithEnvironment(ctx => { ... AdminConnectionString ... })` block in `AppHost/Program.cs`.
+2. `MyProject/SplitConnectionServiceBusSetup.cs`.
+3. The `services.Replace(...)` line in `MyProject/Startup.cs` (and the two `using` directives `EPiServer.Azure.Events.Internal` and `Microsoft.Extensions.DependencyInjection.Extensions` if not used elsewhere).
+
+A future template release will land this cleanup once the upstream fix is in a published Aspire version.
 
 ## Compatibility
 

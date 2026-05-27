@@ -120,6 +120,26 @@ try {
         $allOk = $false
     }
 
+    # ── aspire#14041 workaround checks ──────────────────────────────────────
+    if (Test-Path "$ProjectName/SplitConnectionServiceBusSetup.cs") {
+        Write-Host "  OK   SplitConnectionServiceBusSetup.cs in web project (aspire#14041 workaround)" -ForegroundColor Green
+    } else {
+        Write-Host "  FAIL SplitConnectionServiceBusSetup.cs missing from $ProjectName/ (aspire#14041 workaround)" -ForegroundColor Red
+        $allOk = $false
+    }
+    if ($startup -and $startup -match 'services\.Replace\(\s*ServiceDescriptor\.Transient<IServiceBusSetup,\s*SplitConnectionServiceBusSetup>') {
+        Write-Host "  OK   IServiceBusSetup swap injected in Startup.cs (aspire#14041 workaround)" -ForegroundColor Green
+    } else {
+        Write-Host "  FAIL services.Replace<IServiceBusSetup> missing from Startup.cs (aspire#14041 workaround)" -ForegroundColor Red
+        $allOk = $false
+    }
+    if ($appHostProgram -match 'AdminConnectionString' -and $appHostProgram -match 'emulatorhealth') {
+        Write-Host "  OK   AppHost injects AdminConnectionString from emulatorhealth endpoint" -ForegroundColor Green
+    } else {
+        Write-Host "  FAIL AppHost missing AdminConnectionString env-var block (aspire#14041 workaround)" -ForegroundColor Red
+        $allOk = $false
+    }
+
     if (-not $allOk) {
         Write-Error "Validation failed - missing expected files"
         exit 1
