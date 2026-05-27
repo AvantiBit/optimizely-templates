@@ -4,6 +4,20 @@ All notable changes to `AvantiBit.Optimizely.Templates` are documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-05-27
+
+### Fixed
+- **Service Bus emulator startup failure** ([#5](https://github.com/avantibit/optimizely-templates/issues/5)). Generated AppHosts crashed on first `dotnet run` with `HttpIOException: The response ended prematurely` inside `ServiceBusAdministrationClient.GetTopicAsync`. Root cause is upstream [dotnet/aspire#14041](https://github.com/dotnet/aspire/issues/14041): Aspire's emulator connection string targets the AMQP port (5672), not the management port (5300), so EPiServer.Azure's admin client hits the wrong listener.
+
+### Added
+- `SplitConnectionServiceBusSetup.cs` is scaffolded into the CMS web project and registered as `IServiceBusSetup` via `services.Replace(...)`. Same logic as `DefaultServiceBusSetup`, but constructs `ServiceBusAdministrationClient` from a second connection string built off the emulator's `emulatorhealth` endpoint. AMQP send/receive is untouched. Workaround is reversible in three deletes once aspire#14041 ships.
+- AppHost injects `EPiServer__Cms__AzureEventProvider__AdminConnectionString` per replica from `serviceBus.Resource.GetEndpoint("emulatorhealth")`.
+- README section *Service Bus emulator workaround (dotnet/aspire#14041)* documenting the workaround, how to verify events flow end-to-end (via `Cache cleared (remote only)` log + optional ActivitySource tracing flags), and the removal plan.
+- `eng/validate-template.ps1` checks the workaround class is present, the `services.Replace` line is injected, and the AppHost env-var block is emitted.
+
+### Changed
+- `post-setup.ps1` now also injects the `services.Replace` registration into `Startup.cs` and moves `SplitConnectionServiceBusSetup.cs` into the web project. The registration uses a fully-qualified type name (`${ProjectName}.SplitConnectionServiceBusSetup`) so it compiles regardless of which namespace `Startup.cs` lives in.
+
 ## [1.0.0] — 2026-05-25
 
 **CMS 13 GA baseline release.** First stable release; supersedes preview-era prototypes.
